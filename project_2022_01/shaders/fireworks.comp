@@ -1,0 +1,160 @@
+#version 450 core
+
+
+
+layout (local_size_x = 256) in;
+
+
+
+layout (std430, binding = 0) buffer PosBuffer { vec4 pos[]; };
+layout (std430, binding = 1) buffer VelBuffer { vec4 vel[]; };
+layout (std430, binding = 2) buffer AccBuffer { vec4 acc[]; };
+layout (std430, binding = 3) buffer ColorBuffer { vec4 color[]; };
+layout (std430, binding = 4) buffer FadeTimingBuffer { vec2 fade_timing[]; }; // (fade start, fade end)
+layout (std430, binding = 5) buffer BlinkTimingBuffer { vec2 blink_timing[]; }; // (blink start, blink frequency)
+
+
+layout (std140, binding = 6) buffer FireworkParams
+{
+    uint particle_count;
+
+    float explosion_force;
+    float explosion_force_variance;
+
+    float particle_size_base;
+    float rocket_size_mult;
+
+    float hue_variance;
+    float saturation_variance;
+
+    float end_time;
+
+    float fade_start;
+    float fade_start_variance;
+    float fade_end_variance;
+    float fade_size_mult;
+
+    float blink_start;
+    float blink_freq;
+    float blink_start_variance;
+    float blink_freq_variance;
+    float blink_size_mult;
+};
+
+
+layout (location = 0) uniform float time_delta;
+layout (location = 1) uniform float hash31_seed;
+layout (location = 2) uniform float gravity;
+
+layout (location = 3) uniform uint stage;
+layout (location = 4) uniform uint last_stage;
+
+
+
+// Noise function by Dave Hoskins.
+vec3 hash31(float p)
+{
+    vec3 p3 = fract(vec3(p) * vec3(.1031, .11369, .13787));
+    p3 += dot(p3, vec3(p3.y + 19.19, p3.z + 19.19, p3.x + 19.19));
+    return fract(vec3((p3.x + p3.y) * p3.z, (p3.x + p3.z) * p3.y, (p3.y + p3.z) * p3.x));
+}
+
+
+vec3 hsv_to_rgb(vec3 hsv)
+{
+    vec3 k = mod((vec3(5.0f, 3.0f, 1.0f) + hsv.r * 6.0f), 6.0f);
+    return hsv.b * (1.0f - hsv.g * clamp(min(k, 4.0f - k), 0.0f, 1.0f));
+}
+
+vec3 rgb_to_hsv(vec3 rgb)
+{
+    float value = max(max(rgb.r, rgb.g), rgb.b);
+    float chroma = value - min(min(rgb.r, rgb.g), rgb.b);
+    float hue = (chroma == 0.0f) ? 0.0f : ((value == rgb.r) ? (rgb.g - rgb.b) / chroma : ((value == rgb.g) ? 2.0f + (rgb.b - rgb.r) / chroma : 4.0f + (rgb.r - rgb.g) / chroma)) / 6.0f;
+    return vec3(hue, chroma / value, value);
+}
+
+
+float linmap(float a0, float a1, float b0, float b1, float x)
+{
+    return (b1 - b0) * (x - a0) / (a1 - a0) + b0;
+}
+
+// linmap(0, 1, b0, b1, x)
+float linmap01(float b0, float b1, float x)
+{
+    return (b1 - b0) * x + b0;
+}
+
+// linmap(0, 1, -v, v, x)
+float linmap01v(float v, float x)
+{
+    return v * (2.0f * x - 1.0f);
+}
+
+
+
+void main()
+{
+    uint index = gl_GlobalInvocationID.x;
+
+    if (index < particle_count) {
+        if (stage == 1 && last_stage == 0) {
+            vec3 color_hsv = rgb_to_hsv(color[0].rgb);
+            pos[index] = pos[0];
+            vel[index] = vel[0];
+
+            barrier();
+
+            vec3 r;
+
+            // ----------------------------- per particle randomiztion -----------------------------
+            // [todo] optimize - spread across multiple shader runs
+            float explosion_force_mult = 1.0f + (hash31(index + hash31_seed + 0.1f).x * 2.0f - 1.0f) * explosion_force_variance;
+            vec3 direction = normalize(hash31(index + hash31_seed) * 2.0f - 1.0f);
+            acc[index] = vec4(direction * explosion_force * explosion_force_mult, 0.0);
+
+            // color
+            r = hash31(index + hash31_seed + 0.2f);
+            float sat_min = max(color_hsv.g - saturation_variance, 0.0f);
+            float sat_max = min(color_hsv.g + saturation_variance, 1.0f);
+            float sat = color_hsv.g + linmap01(sat_min, sat_max, r.x);
+            float hue = color_hsv.r + linmap01(-hue_variance, hue_variance, r.y);
+            color[index] = vec4(hsv_to_rgb(vec3(hue, sat, color_hsv.b)), 1.0f);
+
+            // fading
+            r = hash31(index + hash31_seed + 0.3f);
+            float fade_duration = end_time - fade_start;
+            float fade_start_offset = fade_duration * linmap01v(fade_start_variance, r.x);
+            float fade_end_offset = fade_duration * linmap01(-fade_end_variance, 0.0f, r.y);
+            fade_timing[index] = vec2(fade_start + fade_start_offset, end_time + fade_end_offset);
+
+            // blinking
+            r = hash31(index + hash31_seed + 0.4f);
+            float blink_duration = end_time - blink_start;
+            float blink_start_offset = blink_duration * linmap01v(blink_start_variance, r.x);
+            float blink_freq_offset = blink_freq * linmap01v(blink_freq_variance, r.y);
+            blink_timing[index] = vec2(blink_start + blink_start_offset, blink_freq + blink_freq_offset);
+        } else if (stage == 2 && last_stage == 1) {
+            acc[index] = vec4(0.0f);
+        }
+
+        vec4 g = vec4(0.0f, -gravity, 0.0f, 0.0f);
+
+        if (stage == 0) {
+            if (index == 0) {
+                vec4 v = vel[0];
+                vec4 a = g;
+                
+                pos[0] += v * time_delta + 0.5f * a * time_delta * time_delta;
+                vel[0] += a * time_delta;
+            }
+        } else {
+            vec4 v = vel[index];
+            vec4 a = acc[index] + g;
+
+            pos[index] += v * time_delta + 0.5f * a * time_delta * time_delta;
+            vel[index] += a * time_delta;
+        }
+    }
+}

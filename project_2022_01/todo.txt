@@ -1,0 +1,14 @@
+math util - functions for randomization with additive/mutltiplicative variance
+non constant firework count
+math util - add templates for linear mapping
+firework - randimze fading and blinking
+
+    [maybe]
+do not mirror objects under mirror
+    for particles done
+    maybe also for normal objects
+addaptive mirror texture size
+find best hdr values
+UBOVector - remove inheritence from OpenGLObject
+firework - add non uniform randomization
+firework - don't use muttiple buffers for firework pos, vel, acc, ..., use one buffer of structs
